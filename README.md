@@ -17,6 +17,7 @@ Los datos viven únicamente en el dispositivo (IndexedDB).
 | Exportación XLSX y CSV | Hecho |
 | Backup y restauración (JSON) | Hecho |
 | PWA instalable, con icono y funcionamiento offline | Hecho |
+| Importación aditiva de un histórico (vista previa, duplicados, cancelar y deshacer) | Hecho |
 
 El repositorio aún no tiene commits ni está publicado: falta el paso "Publicar en GitHub Pages" (abajo).
 
@@ -67,11 +68,14 @@ css/styles.css         Estilos (mobile-first, modo claro/oscuro automático)
 js/app.js              Toda la lógica de interfaz y estado
 js/db.js               Acceso a IndexedDB
 js/xlsx.js             Generador XLSX mínimo propio (ZIP sin compresión + XML)
+js/import.js           Validación y plan de la importación aditiva (sin DOM; también lo usa la herramienta)
 sw.js                  Service worker (offline)
 manifest.webmanifest   Manifiesto PWA
 icons/                 Iconos PNG (180, 192, 512)
 tools/make_icons.py    Regenera los iconos (opcional, requiere Pillow)
+tools/historico/       Transformación de un histórico manual a archivo de importación (ver su README)
 tests/e2e.mjs          Pruebas end-to-end (Playwright; solo desarrollo)
+tests/historico.test.mjs  Pruebas de la transformación y la importación (node --test)
 .nojekyll              Evita que GitHub Pages procese el sitio con Jekyll
 ```
 
@@ -121,6 +125,14 @@ Configuración (`meta.config`): `categories [{name, subs[]}]`, `units[]`,
 
 Backup: `{ format: "gastos-app-backup", schemaVersion: 1, appVersion, exportedAt, config, expenses }`.
 Restaurar **reemplaza** todos los datos del dispositivo (previa confirmación).
+
+### Importar gastos (histórico)
+
+Ajustes > **Importar archivo…** agrega gastos desde un archivo `gastos-app-import` (JSON) **sin tocar los
+existentes**: valida cada registro, omite duplicados, informa los rechazados y muestra un resumen antes de
+guardar; se puede cancelar y, después, **deshacer** el último lote. Se guarda en una sola transacción.
+El archivo se genera con `tools/historico/` — procedimiento completo en `tools/historico/README.md`.
+Los históricos reales y sus resultados no forman parte del repositorio (`import/` está en `.gitignore`).
 
 ### Columnas de la exportación
 
@@ -175,7 +187,7 @@ siempre desde el icono de la pantalla de inicio.
 
 `git push` y listo. En el iPhone la versión nueva aparece al abrir la app por segunda vez con conexión.
 Si se agregan archivos nuevos, añadirlos a `ASSETS` en `sw.js`. Para forzar el descarte de toda la caché,
-cambiar `CACHE` (`gastos-v1` → `gastos-v2`). Actualizar la app no toca los datos.
+cambiar `CACHE` (`gastos-v2` → `gastos-v3`). Actualizar la app no toca los datos.
 
 ## Pruebas
 
@@ -227,5 +239,4 @@ Fuera del alcance de la V1; evaluar después de usarla un tiempo:
 - Exportar solo un rango de fechas o lo filtrado en el historial.
 - Fusionar backups en lugar de reemplazar.
 - Reordenar catálogos; recordar la última categoría o medio de pago usados.
-- Importar el historial previo de Notas mediante CSV.
 - Sincronización (iCloud u otra), Atajos de iOS / Siri, OCR de comprobantes, presupuestos y alertas.

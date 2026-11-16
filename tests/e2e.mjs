@@ -13,6 +13,7 @@ import { readFile, mkdir, writeFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { transformar } from '../tools/historico/transformar.mjs';
 
 const require = createRequire(process.env.PW_HOME ? path.join(process.env.PW_HOME, 'x.js') : import.meta.url);
 const { webkit, chromium, devices } = require('playwright');
@@ -362,6 +363,146 @@ print(json.dumps({"title": ws.title, "rows": rows, "date_is_date": isinstance(ws
     check('compartir (simulado): archivo XLSX entregado a navigator.share', shared.name === `gastos_${today}.xlsx` && shared.type.includes('spreadsheetml') && shared.size > 1000, JSON.stringify(shared));
     await ctx2.close();
 
+    // --- importación aditiva del histórico (muestra ficticia, dispositivo limpio) ---
+    {
+      const dir = path.join(ROOT, 'tools', 'historico');
+      const fuentes = [];
+      for (const n of ['notas-a', 'notas-b']) fuentes.push({ nombre: n, texto: await readFile(path.join(dir, 'muestra', `${n}.txt`), 'utf8') });
+      const { archivo } = transformar({ fuentes, reglasRaw: JSON.parse(await readFile(path.join(dir, 'reglas.ejemplo.json'), 'utf8')) });
+      const N = archivo.expenses.length;
+      const impFile = path.join(OUT, `${name}-import.json`);
+      await writeFile(impFile, JSON.stringify(archivo));
+
+      const ctx3 = await browser.newContext(options);
+      const p3 = await ctx3.newPage();
+      watch(p3);
+      await p3.goto(base);
+      await ready(p3);
+      const toastHas = (text) => p3.waitForFunction((t) => { const el = document.querySelector('#toast'); return !el.hidden && el.textContent.includes(t); }, text, { timeout: 5000 }).then(() => true, () => false);
+      const histCount = async () => { await tab(p3, 'historial'); return count(p3); };
+      const pick = async (file) => { await tab(p3, 'ajustes'); await p3.setInputFiles('#import-file', file); };
+
+      await addExpense(p3, { amount: '50', concept: 'Gasto previo', category: 'Otros', method: 'Efectivo' });
+      await addExpense(p3, { amount: '2.5', concept: 'pan', category: 'Alimentación', method: 'Efectivo', date: `${archivo.source.anio}-03-03` });
+      await tab(p3, 'ajustes');
+      check('importar: botón Deshacer oculto sin importaciones', await p3.isHidden('#btn-undo-import'));
+
+      // archivo que no es de importación (p. ej. un backup) se rechaza sin tocar datos
+      const notImport = path.join(OUT, `${name}-no-import.json`);
+      await writeFile(notImport, JSON.stringify({ format: 'gastos-app-backup', expenses: [] }));
+      await pick(notImport);
+      check('importar: rechaza archivos que no son de importación', await toastHas('no es un archivo de importación') && await p3.isHidden('#modal'));
+
+      // posibles duplicados -> omitir; vista previa -> cancelar
+      await pick(impFile);
+      await p3.waitForSelector('#modal:not([hidden])');
+      eq('importar: avisa de posibles duplicados', await p3.textContent('#modal-title'), 'Posibles duplicados');
+      await p3.click('#modal-cancel');
+      await p3.waitForFunction(() => document.querySelector('#modal-title').textContent.includes('Importar estos gastos'));
+      let msg = await p3.textContent('#modal-message');
+      check('importar: vista previa con conteos', msg.includes(`contiene ${N} registros`) && msg.includes(`Se agregarán ${N - 1} gastos`) && msg.includes('Posibles duplicados de gastos ya registrados: 1 (se omiten)') && msg.includes('Tus 2 gastos actuales no se modifican'), msg);
+      check('importar: vista previa anuncia catálogos nuevos', msg.includes('Panadería') && msg.includes('Banco Demo'), msg);
+      await noOverflow(p3, 'vista previa de importación');
+      await shot3();
+      await p3.click('#modal-cancel');
+      check('importar: cancelar informa', await toastHas('cancelada'));
+      eq('importar: cancelar no modifica nada', await histCount(), 2);
+      await p3.reload();
+      await ready(p3);
+      eq('importar: tras cancelar y recargar siguen 2 gastos', await histCount(), 2);
+
+      // importar de verdad
+      await pick(impFile);
+      await p3.click('#modal-cancel'); // omite el posible duplicado
+      await p3.waitForFunction(() => document.querySelector('#modal-title').textContent.includes('Importar estos gastos'));
+      await p3.click('#modal-ok');
+      check('importar: confirma el resultado', await toastHas(`Importación completada: ${N - 1} gastos`));
+      eq('importar: gastos agregados sin perder los existentes', await histCount(), 2 + N - 1);
+      await p3.fill('#h-q', 'Gasto previo');
+      eq('importar: el gasto previo sigue ahí', await count(p3), 1);
+      await p3.fill('#h-q', '');
+      await p3.reload();
+      await ready(p3);
+      eq('importar: persiste tras recargar', await histCount(), 2 + N - 1);
+      await tab(p3, 'nuevo');
+      await p3.selectOption('#f-category', 'Alimentación');
+      const subs = await p3.locator('#f-subcategory option').allTextContents();
+      check('importar: subcategorías nuevas añadidas sin quitar las existentes', subs.includes('Panadería') && subs.includes('Supermercado'), subs.join());
+      check('importar: medios de pago nuevos disponibles', (await p3.locator('#f-method option').allTextContents()).includes('Vale'));
+      await tab(p3, 'resumen');
+      for (let i = 0; i < 40 && !(await p3.textContent('#m-label')).includes(`marzo de ${archivo.source.anio}`); i++) await p3.click('#m-prev');
+      const sumText = await p3.textContent('#summary-body');
+      check('importar: resumen del mes histórico con "Sin categoría" y "Sin medio de pago"', sumText.includes('Sin categoría') && sumText.includes('Sin medio de pago') && sumText.includes('Panadería') === false && sumText.includes('Alimentación'), sumText);
+
+      // reimportar el mismo archivo no duplica
+      await pick(impFile);
+      await p3.waitForSelector('#modal:not([hidden])');
+      await p3.click('#modal-cancel');
+      await p3.waitForFunction(() => document.querySelector('#modal-title').textContent.includes('Nada que importar'));
+      msg = await p3.textContent('#modal-message');
+      check('importar: reimportar detecta todos los duplicados', msg.includes(`Duplicados que se omiten: ${N - 1}`), msg);
+      await p3.click('#modal-ok');
+      eq('importar: reimportar no duplica', await histCount(), 2 + N - 1);
+
+      // un gasto importado sin medio de pago no recibe uno por defecto al editarlo
+      await p3.locator('#h-list .item', { hasText: 'Figuras' }).click();
+      eq('editar importado: medio de pago vacío se conserva', await p3.inputValue('#f-method'), '');
+      eq('editar importado: cantidad vacía se conserva', await p3.inputValue('#f-quantity'), '');
+      await p3.selectOption('#f-category', 'Entretenimiento');
+      await p3.click('#btn-save');
+      await p3.waitForSelector('#view-historial:not([hidden])');
+
+      // archivo con un registro inválido: se informa y el resto entra
+      const mixed = path.join(OUT, `${name}-import-mixto.json`);
+      await writeFile(mixed, JSON.stringify({ format: 'gastos-app-import', schemaVersion: 1, expenses: [
+        { id: 'demo-1', date: '2025-01-05', concept: 'Válido', amount: 10, currency: 'PEN' },
+        { id: 'demo-2', date: '2025-01-05', concept: 'Sin importe', currency: 'PEN' },
+        { id: 'demo-3', date: '2025-13-40', concept: 'Fecha mala', amount: 3, currency: 'PEN' },
+      ] }));
+      await pick(mixed);
+      await p3.waitForSelector('#modal:not([hidden])');
+      msg = await p3.textContent('#modal-message');
+      check('importar: informa rechazados con motivo', msg.includes('Rechazados por datos inválidos: 2') && msg.includes('importe ausente') && msg.includes('fecha ausente o inválida'), msg);
+      await p3.click('#modal-cancel');
+      eq('importar: cancelar archivo mixto no agrega nada', await histCount(), 2 + N - 1);
+
+      // deshacer: retira lo importado, conserva lo editado y lo previo
+      await tab(p3, 'ajustes');
+      check('deshacer: información de la última importación', (await p3.textContent('#import-info')).includes(`${N - 1} gastos`));
+      await p3.click('#btn-undo-import');
+      await p3.click('#modal-cancel');
+      eq('deshacer: cancelar no elimina nada', await histCount(), 2 + N - 1);
+      await tab(p3, 'ajustes');
+      await p3.click('#btn-undo-import');
+      msg = await p3.textContent('#modal-message');
+      check('deshacer: avisa de los gastos editados que se conservan', msg.includes(`${N - 2} gastos importados`) && msg.includes('1 gasto que editaste'), msg);
+      await p3.click('#modal-ok');
+      check('deshacer: confirma', await toastHas('Importación deshecha'));
+      eq('deshacer: quedan los 2 previos + el editado', await histCount(), 3);
+      await p3.reload();
+      await ready(p3);
+      eq('deshacer: persiste tras recargar', await histCount(), 3);
+      await tab(p3, 'ajustes');
+      check('deshacer: botón oculto tras deshacer', await p3.isHidden('#btn-undo-import'));
+
+      // volver a cargar tras corregir: entra todo menos lo que ya está
+      await pick(impFile);
+      await p3.click('#modal-cancel');
+      await p3.waitForFunction(() => document.querySelector('#modal-title').textContent.includes('Importar estos gastos'));
+      await p3.click('#modal-ok');
+      await toastHas('Importación completada');
+      eq('reimportar tras deshacer: sin duplicar el editado', await histCount(), 2 + N - 1);
+      await ctx3.close();
+
+      async function shot3() {
+        const before = errors.length;
+        await p3.screenshot({ path: path.join(OUT, `${name}-importar-vista-previa.png`) });
+        await p3.waitForTimeout(100);
+        const during = errors.splice(before);
+        errors.push(...during.filter((e) => !e.includes('Refused to apply a stylesheet')));
+      }
+    }
+
     // --- PWA: manifiesto, iconos, service worker ---
     const manifest = await page.evaluate(async () => (await fetch(document.querySelector('link[rel=manifest]').href)).json());
     check('manifiesto: standalone con iconos 192 y 512', manifest.display === 'standalone' && manifest.icons.some((i) => i.sizes === '192x192') && manifest.icons.some((i) => i.sizes === '512x512'));
@@ -386,7 +527,7 @@ print(json.dumps({"title": ws.title, "rows": rows, "date_is_date": isinstance(ws
       await page.reload(); // la página pasa a estar controlada por el service worker
       await ready(page);
       check('página controlada por el service worker', await page.evaluate(() => Boolean(navigator.serviceWorker.controller)));
-      const cached = await page.evaluate(async () => (await (await caches.open('gastos-v1')).keys()).length);
+      const cached = await page.evaluate(async () => (await (await caches.open('gastos-v2')).keys()).length);
       check('recursos precargados en caché', cached >= 10, `${cached} entradas`);
 
       // --- offline real: servidor apagado y red cortada ---

@@ -1,0 +1,36 @@
+{
+  "_ayuda": "Reglas de ejemplo con datos ficticios. Copia este archivo fuera del repositorio (carpeta import/) y adáptalo. 'si' es una expresión regular que se evalúa contra el concepto en minúsculas y sin tildes; gana la primera regla que coincide. conf: alta | media | baja | pendiente (baja y pendiente nunca se incorporan, solo se sugieren).",
+  "anio": 2025,
+  "marcarRevisionEnNota": true,
+  "moneda": { "codigo": "PEN", "confianza": "alta", "razon": "todo el histórico está en soles" },
+  "monedaDudosa": [{ "si": "^suscripcion", "razon": "servicio en línea que podría cobrarse en dólares" }],
+  "mediosDePago": {
+    "yape": { "medio": "Yape", "medioConf": "alta" },
+    "ypea": { "medio": "Yape", "medioConf": "media", "razon": "errata de Yape" },
+    "banco": { "medio": "Tarjeta de crédito", "medioConf": "media", "cuenta": "Banco Demo", "cuentaConf": "alta", "razon": "alias de tarjeta" },
+    "vale": { "medio": "Vale", "medioConf": "alta" }
+  },
+  "categorias": [
+    { "name": "Alimentación", "subs": ["Panadería", "Verduras", "Frutas", "Lácteos", "Abarrotes", "Snacks y dulces"] },
+    { "name": "Transporte", "subs": ["Taxi"] },
+    { "name": "Vivienda", "subs": ["Limpieza", "Hogar"] },
+    { "name": "Servicios", "subs": ["Suscripciones"] },
+    { "name": "Entretenimiento", "subs": [] }
+  ],
+  "reglas": [
+    { "si": "^taxi\\b", "cat": "Transporte", "sub": "Taxi", "conf": "alta" },
+    { "si": "^pan\\b", "cat": "Alimentación", "sub": "Panadería", "conf": "alta" },
+    { "si": "\\btomates?\\b", "cat": "Alimentación", "sub": "Verduras", "conf": "alta" },
+    { "si": "\\b(manzana|uva)s?\\b", "cat": "Alimentación", "sub": "Frutas", "conf": "alta" },
+    { "si": "^(leche|queso)\\b", "cat": "Alimentación", "sub": "Lácteos", "conf": "alta" },
+    { "si": "^arroz\\b", "cat": "Alimentación", "sub": "Abarrotes", "conf": "alta" },
+    { "si": "^galletas?\\b", "cat": "Alimentación", "sub": "Snacks y dulces", "conf": "media" },
+    { "si": "^jabon\\b", "cat": "Vivienda", "sub": "Limpieza", "conf": "media" },
+    { "si": "^cortina", "cat": "Vivienda", "sub": "Hogar", "conf": "alta" },
+    { "si": "^suscripcion", "cat": "Servicios", "sub": "Suscripciones", "conf": "alta" },
+    { "si": "^figuras", "cat": "Entretenimiento", "sub": "", "conf": "baja", "razon": "podría ser un juguete o un coleccionable" }
+  ],
+  "comercios": [{ "si": "^tienda demo$", "comercio": "Tienda Demo", "conf": "alta" }],
+  "noGasto": [{ "si": "^pago tarjeta$", "razon": "pago de la tarjeta de crédito: contarlo duplicaría los consumos" }],
+  "sinCantidad": ["^taxi"]
+}

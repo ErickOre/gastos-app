@@ -9,13 +9,14 @@
 // Si se agrega un archivo nuevo a la app, hay que añadirlo a ASSETS.
 // Cambiar CACHE fuerza a descartar toda la caché anterior.
 
-const CACHE = 'gastos-v1';
+const CACHE = 'gastos-v2';
 const ASSETS = [
   './',
   'index.html',
   'css/styles.css',
   'js/app.js',
   'js/db.js',
+  'js/import.js',
   'js/xlsx.js',
   'manifest.webmanifest',
   'icons/icon-192.png',

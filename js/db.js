@@ -62,6 +62,26 @@ export const setMeta = (key, value) =>
     tx.objectStore('meta').put({ key, value });
   });
 
+// Importación aditiva en una sola transacción: agrega gastos, actualiza catálogos y registra
+// el lote para poder deshacerlo. Usa add() (no put()): si algún id ya existiera, la transacción
+// completa se aborta y no se sobrescribe ni se guarda nada.
+export const importBatch = ({ expenses, config, lastImport }) =>
+  run(['expenses', 'meta'], 'readwrite', (tx) => {
+    const s = tx.objectStore('expenses');
+    for (const e of expenses) s.add(e);
+    const meta = tx.objectStore('meta');
+    meta.put({ key: 'config', value: config });
+    meta.put({ key: 'lastImport', value: lastImport });
+  });
+
+// Deshace un lote importado: borra solo los ids indicados y olvida el lote, todo o nada.
+export const undoImport = (ids) =>
+  run(['expenses', 'meta'], 'readwrite', (tx) => {
+    const s = tx.objectStore('expenses');
+    for (const id of ids) s.delete(id);
+    tx.objectStore('meta').delete('lastImport');
+  });
+
 // Reemplaza TODO el contenido (restauración de backup) en una sola transacción:
 // si algo falla, no queda un estado a medias.
 export const replaceAll = ({ config, expenses }) =>
@@ -69,5 +89,7 @@ export const replaceAll = ({ config, expenses }) =>
     const s = tx.objectStore('expenses');
     s.clear();
     for (const e of expenses) s.put(e);
-    tx.objectStore('meta').put({ key: 'config', value: config });
+    const meta = tx.objectStore('meta');
+    meta.put({ key: 'config', value: config });
+    meta.delete('lastImport'); // el lote importado ya no describe los datos restaurados
   });

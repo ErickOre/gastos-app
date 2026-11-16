@@ -3,6 +3,7 @@
 
 import * as db from './db.js';
 import { buildXlsx } from './xlsx.js';
+import { planImport } from './import.js';
 
 const APP_VERSION = '1.0.0';
 const BACKUP_FORMAT = 'gastos-app-backup';
@@ -39,6 +40,7 @@ const state = {
   config: structuredClone(DEFAULT_CONFIG),
   expenses: [],
   lastBackupAt: null,
+  lastImport: null,
   editingId: null,
   view: 'nuevo',
   filters: { q: '', from: '', to: '', category: '', method: '', account: '', merchant: '' },
@@ -223,7 +225,9 @@ function refreshFormOptions(values = {}) {
   fillSelect(F.currency, state.config.currencies, { current: v.currency || defaultCurrency() });
   fillSelect(F.category, state.config.categories.map(nameOf), { empty: 'Sin categoría', current: v.category });
   refreshSubcategories(v.subcategory);
-  fillSelect(F.method, state.config.paymentMethods.map(nameOf), { current: v.method });
+  // Un gasto importado puede no tener medio de pago: al editarlo no se le asigna uno por defecto.
+  const editing = state.editingId && state.expenses.find((e) => e.id === state.editingId);
+  fillSelect(F.method, state.config.paymentMethods.map(nameOf), { empty: editing && !editing.paymentMethod ? 'Sin especificar' : null, current: v.method });
   refreshAccountField(v.account);
   fillSelect(F.unit, state.config.units, { current: v.unit });
   $('#merchants-list').replaceChildren(...state.config.merchants.map((m) => h('option', { value: m })));
@@ -248,7 +252,7 @@ function loadForm(expense) {
     currency: e.currency || defaultCurrency(),
     category: e.category || '',
     subcategory: e.subcategory || '',
-    method: e.paymentMethod || nameOf(state.config.paymentMethods[0]),
+    method: expense ? e.paymentMethod || '' : nameOf(state.config.paymentMethods[0]),
     account: e.account || '',
     unit: e.unit || state.config.units[0],
   });
@@ -654,6 +658,11 @@ function renderSettings() {
     : 'Aún no has creado ningún backup.';
   $('#backup-info').textContent =
     `${n} ${n === 1 ? 'gasto guardado' : 'gastos guardados'} solo en este dispositivo. ${last} El backup incluye gastos y catálogos; guárdalo fuera del teléfono periódicamente.`;
+  const li = state.lastImport;
+  $('#import-info').textContent = li
+    ? `Última importación: ${li.items.length} gastos de "${li.file}" (${new Date(li.at).toLocaleString('es-PE', { dateStyle: 'medium', timeStyle: 'short' })}).`
+    : 'Agrega gastos desde un archivo de importación (.json) sin tocar los ya registrados. Antes de guardar verás un resumen y podrás cancelar.';
+  $('#btn-undo-import').hidden = !li;
   $('#about').textContent = `Gastos v${APP_VERSION} · Tus datos no salen de este dispositivo.`;
 }
 
@@ -797,9 +806,114 @@ async function restoreBackup(file) {
   await db.replaceAll({ config, expenses });
   state.config = config;
   state.expenses = expenses;
+  state.lastImport = null;
   loadForm(null);
   renderSettings();
   toast(`Backup restaurado: ${expenses.length} gastos`);
+}
+
+// ---------- importación aditiva (histórico) ----------
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function importSummary(plan, includePossible) {
+  const lines = [];
+  const sample = (list) => list.slice(0, 5).map((r) => `   · n.º ${r.index + 1}${r.label ? ` "${r.label}"` : ''}: ${r.reason}`)
+    .concat(list.length > 5 ? [`   · … y ${list.length - 5} más`] : []);
+  lines.push(`El archivo contiene ${plural(plan.total, 'registro', 'registros')}.`);
+  if (plan.toImport.length) {
+    lines.push(`Se agregarán ${plural(plan.toImport.length, 'gasto', 'gastos')} (${plan.from} a ${plan.to}) por ` +
+      plan.totals.map((t) => money(t.amount, t.currency)).join(' + ') + '.');
+    if (plan.uncategorized) lines.push(`${plan.uncategorized} sin categoría (quedan como "Sin categoría").`);
+    if (plan.noMethod) lines.push(`${plan.noMethod} sin medio de pago.`);
+  } else {
+    lines.push('No hay gastos nuevos para agregar.');
+  }
+  if (plan.duplicates.length) lines.push(`Duplicados que se omiten: ${plan.duplicates.length}.`, ...sample(plan.duplicates));
+  if (plan.possible.length) {
+    lines.push(`Posibles duplicados de gastos ya registrados: ${plan.possible.length} (${includePossible ? 'se agregarán' : 'se omiten'}).`, ...sample(plan.possible));
+  }
+  if (plan.rejected.length) lines.push(`Rechazados por datos inválidos: ${plan.rejected.length}.`, ...sample(plan.rejected));
+  const a = plan.added;
+  const news = [
+    ['categorías', a.categories], ['subcategorías', a.subcategories], ['medios de pago', a.paymentMethods],
+    ['tarjetas/cuentas', a.accounts], ['unidades', a.units], ['monedas', a.currencies],
+  ].filter(([, list]) => list.length).map(([label, list]) => `${label}: ${list.join(', ')}`);
+  if (news.length) lines.push('Se añadirán a los catálogos — ' + news.join('; ') + '.');
+  if (a.merchants.length) lines.push(`Comercios nuevos: ${a.merchants.length}.`);
+  lines.push(`Tus ${plural(state.expenses.length, 'gasto actual', 'gastos actuales')} no se modifican.`);
+  return lines.join('\n');
+}
+
+async function importFile(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    return toast('El archivo no es un JSON válido.');
+  }
+  let includePossible = false;
+  let plan = planImport(data, state.expenses, state.config);
+  if (plan.error) return toast(plan.error);
+
+  // Paso opcional: decidir qué hacer con los posibles duplicados. Cancelar aquí los omite.
+  if (plan.possible.length) {
+    includePossible = Boolean(await ask({
+      title: 'Posibles duplicados',
+      message: `${plural(plan.possible.length, 'registro coincide', 'registros coinciden')} en fecha, concepto e importe con gastos que ya tienes.\n` +
+        '"Agregar también" los importa igualmente; "Cancelar" los omite (recomendado). En el siguiente paso aún podrás cancelar todo.',
+      okText: 'Agregar también',
+    }));
+    if (includePossible) plan = planImport(data, state.expenses, state.config, { includePossible });
+  }
+
+  if (!plan.toImport.length) {
+    await ask({ title: 'Nada que importar', message: importSummary(plan, includePossible), okText: 'Cerrar' });
+    return;
+  }
+  const ok = await ask({ title: '¿Importar estos gastos?', message: importSummary(plan, includePossible), okText: 'Importar' });
+  if (!ok) return toast('Importación cancelada: no se modificó nada.');
+
+  const now = new Date().toISOString();
+  const expenses = plan.toImport.map((e) => ({ ...e, createdAt: e.createdAt || now, updatedAt: now }));
+  const lastImport = { at: now, file: clean(file.name, 80), items: expenses.map((e) => ({ id: e.id, updatedAt: e.updatedAt })) };
+  try {
+    await db.importBatch({ expenses, config: plan.mergedConfig, lastImport });
+  } catch (err) {
+    console.error(err);
+    return toast('No se pudo importar. No se guardó ningún registro.');
+  }
+  state.expenses = [...state.expenses, ...expenses];
+  state.config = plan.mergedConfig;
+  state.lastImport = lastImport;
+  refreshFormOptions();
+  renderSettings();
+  toast(`Importación completada: ${plural(expenses.length, 'gasto', 'gastos')}`);
+}
+
+async function undoLastImport() {
+  const li = state.lastImport;
+  if (!li) return;
+  // Solo se retiran los gastos que siguen tal como se importaron; los editados después se conservan.
+  const stamp = new Map(li.items.map((i) => [i.id, i.updatedAt]));
+  const untouched = state.expenses.filter((e) => stamp.get(e.id) === e.updatedAt).map((e) => e.id);
+  const edited = state.expenses.filter((e) => stamp.has(e.id) && stamp.get(e.id) !== e.updatedAt).length;
+  const ok = await ask({
+    title: '¿Deshacer la última importación?',
+    message: `Se eliminarán ${plural(untouched.length, 'gasto importado', 'gastos importados')} de "${li.file}".` +
+      (edited ? `\n${plural(edited, 'gasto que editaste', 'gastos que editaste')} después de importar se conservan.` : '') +
+      '\nLos demás gastos y los catálogos no se tocan.',
+    okText: 'Deshacer',
+    danger: true,
+  });
+  if (!ok) return;
+  await db.undoImport(untouched);
+  const gone = new Set(untouched);
+  state.expenses = state.expenses.filter((e) => !gone.has(e.id));
+  state.lastImport = null;
+  loadForm(null);
+  renderSettings();
+  toast(`Importación deshecha: ${plural(untouched.length, 'gasto eliminado', 'gastos eliminados')}`);
 }
 
 // ---------- navegación ----------
@@ -874,17 +988,27 @@ function bindEvents() {
     ev.target.value = ''; // permite volver a elegir el mismo archivo
     if (file) await restoreBackup(file);
   });
+  $('#btn-import').addEventListener('click', () => $('#import-file').click());
+  $('#import-file').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0];
+    ev.target.value = '';
+    if (file) await importFile(file);
+  });
+  $('#btn-undo-import').addEventListener('click', undoLastImport);
 }
 
 async function init() {
   bindEvents();
   state.month = today().slice(0, 7);
   try {
-    const [config, expenses, lastBackupAt] = await Promise.all([db.getMeta('config'), db.getAllExpenses(), db.getMeta('lastBackupAt')]);
+    const [config, expenses, lastBackupAt, lastImport] = await Promise.all([
+      db.getMeta('config'), db.getAllExpenses(), db.getMeta('lastBackupAt'), db.getMeta('lastImport'),
+    ]);
     if (config) state.config = normalizeConfig(config);
     else await db.setMeta('config', state.config);
     state.expenses = expenses;
     state.lastBackupAt = lastBackupAt || null;
+    state.lastImport = lastImport || null;
   } catch (err) {
     console.error(err);
     toast('No se pudo abrir el almacenamiento local. Los datos no se guardarán.');
